@@ -30,8 +30,7 @@ class VisionModule(Protocol):
         """
         Perform any postprocessing on the action based on stored auxilliary information from the vision module
         """
-
-        # Use information from current state to modify the chosen actions
+        # return the same action by default
 
         return action
 
