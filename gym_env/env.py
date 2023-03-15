@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from time import time
-from typing import Callable, List, Protocol, Tuple, TypedDict
+from typing import Callable, List, Optional, Protocol, Tuple, TypedDict
 
 import gym
 import numpy as np
@@ -93,7 +93,7 @@ class SteeringController:
 class CarlaEnvironment(gym.Env):
     config: CarlaEnvironmentConfiguration
     carla_manager: EpisodeManager
-    vision_module: VisionModule
+    vision_module: Optional[VisionModule]
     reward_function: Callable[[WorldState], Tuple[float, bool]]
     speed_controller: PIDController
 
@@ -101,6 +101,7 @@ class CarlaEnvironment(gym.Env):
         """
         Sets up action and observation space based on configurations
         """
+        self.time = time()
         self.amount_of_speed_actions = len(self.config["speed_goal_actions"])
         self.amount_of_steering_actions = len(self.config["steering_actions"])
 
@@ -139,8 +140,6 @@ class CarlaEnvironment(gym.Env):
         observation_space_dict = {}
         lidar = self.carla_manager.config.car_config.lidar
 
-        print("lidar SHAPE", lidar["shape"])
-
         if self.carla_manager.config.car_config.lidar["enabled"]:
             observation_space_dict["lidar"] = Box(
                 low=0,
@@ -174,6 +173,9 @@ class CarlaEnvironment(gym.Env):
         return observation_space_dict
 
     def _set_observation_space_with_vision(self) -> dict:
+        if self.vision_module is None:
+            raise ValueError("Vision module is not set")
+
         observation_space_dict = {
             "vision_encoding": Box(
                 low=self.vision_module.low,
@@ -232,17 +234,20 @@ class CarlaEnvironment(gym.Env):
                 "lidar"
             ] = self.state.ego_vehicle_state.sensor_data.lidar_data.bev
 
-        observation["state"] = self.state.ego_vehicle_state.speed
+        observation["state"] = np.array([self.state.ego_vehicle_state.speed])
 
         return observation
 
     def _get_obs_with_vision(self):
+        if self.vision_module is None:
+            raise ValueError("Vision module is not set")
+
         vision_encoding = self.vision_module(self.state)
         # TODO: get direction of target point, and next high level command, and use as observation state for the RL model
 
         observation = {
             "vision_encoding": vision_encoding,
-            "state": self.state.ego_vehicle_state.speed,
+            "state": np.array([self.state.ego_vehicle_state.speed]),
         }
 
         return observation
@@ -250,7 +255,6 @@ class CarlaEnvironment(gym.Env):
     def step(self, action):
         goal_speed = 0.0
         steering = 0.0
-        start_time = time()
 
         if self.config["discrete_actions"]:
             goal_speed = self.config["speed_goal_actions"][
@@ -281,11 +285,7 @@ class CarlaEnvironment(gym.Env):
 
         reward, done = self.reward_function(self.state)
 
-        print(f"TIME TO RUN STEP: {time() - start_time} seconds")
-
-        result = (self._get_obs(), reward, done, {})
-        print(result[0]["image_0"].shape)
-
+        self.time = time()
         return (self._get_obs(), reward, done, {})
 
     def seed(self, seed=None):
