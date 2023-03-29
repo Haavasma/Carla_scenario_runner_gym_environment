@@ -62,8 +62,15 @@ def default_config() -> CarlaEnvironmentConfiguration:
     }
 
 
+class PIDController(Protocol):
+    def __call__(
+        self, target_vel: float, current_vel: float
+    ) -> Tuple[float, float, bool]:
+        return (0.0, 0.0, False)
+
+
 @dataclass
-class PIDController:
+class SpeedController(PIDController):
     kp: float = 0.5
     ki: float = 0.1
     kd: float = 0.2
@@ -75,7 +82,6 @@ class PIDController:
     def __call__(
         self, target_vel: float, current_vel: float
     ) -> Tuple[float, float, bool]:
-        print("CURRENT SPEED: ", current_vel)
         error = target_vel - current_vel
         derivative = error - self.last_error
         self.integral += error
