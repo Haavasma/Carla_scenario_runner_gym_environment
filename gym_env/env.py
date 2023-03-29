@@ -62,7 +62,7 @@ def default_config() -> CarlaEnvironmentConfiguration:
         "speed_goal_actions": [],
         "steering_actions": [],
         "discrete_actions": True,
-        "towns": ["Town01", "Town02", "Town03"],
+        "towns": ["Town01", "Town03", "Town04"],
         "town_change_frequency": 10,
     }
 
