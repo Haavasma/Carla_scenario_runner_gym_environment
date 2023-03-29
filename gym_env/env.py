@@ -64,19 +64,40 @@ def default_config() -> CarlaEnvironmentConfiguration:
 
 @dataclass
 class PIDController:
-    kp: float = 0.0
-    ki: float = 0.0
-    kd: float = 0.0
+    kp: float = 0.5
+    ki: float = 0.1
+    kd: float = 0.2
+
+    def __post_init__(self):
+        self.last_error = 0.0
+        self.integral = 0.0
 
     def __call__(
-        self, goal_speed: float, current_speed: float
+        self, target_vel: float, current_vel: float
     ) -> Tuple[float, float, bool]:
-        """
+        print("CURRENT SPEED: ", current_vel)
+        error = target_vel - current_vel
+        derivative = error - self.last_error
+        self.integral += error
+        self.last_error = error
 
-        Returns Throttle, Barke, and whether the agent should be reversing
-        """
+        throttle = self.kp * error + self.ki * self.integral + self.kd * derivative
+        brake = 0.0
 
-        return (0, 0, False)
+        if throttle > 1.0:
+            throttle = 1.0
+        elif throttle < -1.0:
+            throttle = -1.0
+
+        if throttle < 0.0:
+            brake = -throttle
+            throttle = 0.0
+
+        reverse = False
+        if current_vel < 0.0 and target_vel < current_vel:
+            reverse = True
+
+        return throttle, brake, reverse
 
 
 @dataclass
