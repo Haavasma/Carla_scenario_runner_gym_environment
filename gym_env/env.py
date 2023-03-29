@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import random
 from time import time
 from typing import Callable, List, Optional, Protocol, Tuple, TypedDict
 
@@ -50,6 +51,8 @@ class CarlaEnvironmentConfiguration(TypedDict):
     speed_goal_actions: List[float]
     steering_actions: List[float]
     discrete_actions: bool
+    towns: List[str]
+    town_change_frequency: int
 
 
 def default_config() -> CarlaEnvironmentConfiguration:
@@ -59,6 +62,8 @@ def default_config() -> CarlaEnvironmentConfiguration:
         "speed_goal_actions": [],
         "steering_actions": [],
         "discrete_actions": True,
+        "towns": ["Town01", "Town02", "Town03"],
+        "town_change_frequency": 10,
     }
 
 
@@ -129,6 +134,8 @@ class CarlaEnvironment(gym.Env):
         Sets up action and observation space based on configurations
         """
         self.time = time()
+        self._n_episodes = 0
+        self._town = random.choice(self.config["towns"])
         self.amount_of_speed_actions = len(self.config["speed_goal_actions"])
         self.amount_of_steering_actions = len(self.config["steering_actions"])
 
@@ -237,9 +244,14 @@ class CarlaEnvironment(gym.Env):
         return observation_space_dict
 
     def reset(self):
+        # select random town from configurations
+        self._n_episodes += 1
+        if self._n_episodes % self.config["town_change_frequency"] == 0:
+            self._town = random.choice(self.config["towns"])
+
         self.carla_manager.stop_episode()
-        self.state = self.carla_manager.start_episode()
-        print("RESET EPISODE")
+        self.state = self.carla_manager.start_episode(town=self._town)
+        print("RESET EPISODE IN TOWN: ", self._town)
 
         return self._get_obs()
 
