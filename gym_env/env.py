@@ -2,6 +2,7 @@ from dataclasses import dataclass
 import random
 from time import time
 from typing import Callable, List, Optional, Protocol, Tuple, TypedDict
+from episode_manager.renderer import WorldStateRenderer, generate_pygame_surface
 
 import gym
 import numpy as np
@@ -134,6 +135,7 @@ class CarlaEnvironment(gym.Env):
         Sets up action and observation space based on configurations
         """
         self.time = time()
+        self._renderer = None
         self._n_episodes = 0
         self._town = random.choice(self.config["towns"])
         self.amount_of_speed_actions = len(self.config["speed_goal_actions"])
@@ -255,6 +257,17 @@ class CarlaEnvironment(gym.Env):
 
         return self._get_obs()
 
+    def render(self, mode="human") -> Optional[np.ndarray]:
+        if mode == "human":
+            if self._renderer is None:
+                self._renderer = WorldStateRenderer()
+
+            self._renderer.render(self.state)
+            return None
+        else:
+            pygame_surface = generate_pygame_surface(self.state)
+            return np.transpose(np.array(pygame_surface), axes=(1, 0, 2))
+
     def _get_obs(self):
         return (
             self._get_obs_without_vision()
@@ -283,6 +296,10 @@ class CarlaEnvironment(gym.Env):
 
         vision_encoding = self.vision_module(self.state)
         # TODO: get direction of target point, and next high level command, and use as observation state for the RL model
+
+        command = self.state.scenario_state.global_plan[2]
+
+        print("COMMAND: ", command)
 
         observation = {
             "vision_encoding": vision_encoding,
@@ -320,12 +337,15 @@ class CarlaEnvironment(gym.Env):
             new_action = self.vision_module.postprocess_action(new_action)
 
         # update state with result of using the new action
+
         self.state = self.carla_manager.step(new_action)
 
         reward, done = self.reward_function(self.state)
 
+        result = (self._get_obs(), reward, done, {})
         self.time = time()
-        return (self._get_obs(), reward, done, {})
+
+        return result
 
     def seed(self, seed=None):
         self.np_random, seed = seeding.np_random(seed)
