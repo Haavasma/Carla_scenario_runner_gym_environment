@@ -1,9 +1,10 @@
 from dataclasses import dataclass
 import random
 from time import time
-from typing import Callable, List, Optional, Protocol, Tuple, TypedDict
+from typing import Callable, List, Optional, Protocol, Set, Tuple, TypedDict
 from episode_manager.renderer import WorldStateRenderer, generate_pygame_surface
 
+from collections import deque
 import gym
 import numpy as np
 import pygame
@@ -11,6 +12,9 @@ from episode_manager import EpisodeManager
 from episode_manager.episode_manager import Action, WorldState
 from gym.spaces import Box, Dict, Discrete
 from gym.utils import seeding
+from srunner.tools.route_parser import RoadOption
+
+from route_planner import RoutePlanner, find_relative_target_waypoint
 
 
 class VisionModule(Protocol):
@@ -112,6 +116,67 @@ class SpeedController(PIDController):
         return throttle, brake, reverse
 
 
+class Controller(object):
+    def __init__(self, K_P=5.0, K_I=0.5, K_D=1.0, n=20):
+        self._K_P = K_P
+        self._K_I = K_I
+        self._K_D = K_D
+
+        self._window = deque([0 for _ in range(n)], maxlen=n)
+
+    def step(self, error):
+        self._window.append(error)
+
+        if len(self._window) >= 2:
+            integral = np.mean(self._window)
+            derivative = self._window[-1] - self._window[-2]
+        else:
+            integral = 0.0
+            derivative = 0.0
+
+        return self._K_P * error + self._K_I * integral + self._K_D * derivative
+
+
+class TestSpeedController(PIDController):
+    def __init__(
+        self,
+        default_speed: float = 4.0,
+        brake_speed: float = 0.4,
+        brake_ratio: float = 1.1,
+        clip_delta=0.25,
+        clip_throttle=0.75,
+    ):
+        self._default_speed = default_speed
+        self._brake_speed = brake_speed
+        self._brake_ratio = brake_ratio
+        self._clip_delta = clip_delta
+        self._clip_throttle = clip_throttle
+        self._controller = Controller()
+        return
+
+    def __call__(self, wanted_speed: float, current_speed: float):
+        desired_speed = wanted_speed
+
+        brake = (desired_speed < self._brake_speed) or (
+            (current_speed / desired_speed) > self._brake_ratio
+        )
+
+        brake = (desired_speed < self._brake_speed) or (
+            (current_speed / desired_speed) > self._brake_ratio
+        )
+
+        delta = np.clip(desired_speed - current_speed, 0.0, self._clip_delta)
+        throttle = self._controller.step(delta)
+        throttle = np.clip(throttle, 0.0, self._clip_throttle)
+        throttle = throttle if not brake else 0.0
+
+        brake_value = 0.0
+        if brake:
+            brake_value = 1.0
+
+        return (throttle, brake_value, False)
+
+
 @dataclass
 class SteeringController:
     kp: float = 0.0
@@ -137,9 +202,11 @@ class CarlaEnvironment(gym.Env):
         self.time = time()
         self._renderer = None
         self._n_episodes = 0
+        self._steps = 0
         self._town = random.choice(self.config["towns"])
         self.amount_of_speed_actions = len(self.config["speed_goal_actions"])
         self.amount_of_steering_actions = len(self.config["steering_actions"])
+        self._route_planner: Optional[RoutePlanner] = None
 
         if self.config["discrete_actions"]:
             self.action_space = Discrete(
@@ -194,17 +261,7 @@ class CarlaEnvironment(gym.Env):
                 dtype=np.uint8,
             )
 
-        speed_range = (
-            self.config["speed_goal_actions"]
-            if self.config["discrete_actions"]
-            else self.config["continuous_speed_range"]
-        )
-
-        observation_space_dict["state"] = Box(
-            low=np.array([min(speed_range)]),
-            high=np.array([max(speed_range)]),
-            dtype=np.float32,
-        )
+        observation_space_dict["state"] = self._state_observation_space()
 
         return observation_space_dict
 
@@ -221,29 +278,22 @@ class CarlaEnvironment(gym.Env):
             ),
         }
 
-        observation_space_dict["state"] = Box(
-            min(
-                np.array(
-                    [
-                        self.config["continuous_speed_range"]
-                        if self.config["discrete_actions"]
-                        else self.config["speed_goal_actions"]
-                    ]
-                )
-            ),
-            max(
-                np.array(
-                    [
-                        self.config["continuous_speed_range"]
-                        if self.config["discrete_actions"]
-                        else self.config["speed_goal_actions"]
-                    ]
-                )
-            ),
-            dtype=np.float32,
-        )
+        observation_space_dict["state"] = self._state_observation_space()
 
         return observation_space_dict
+
+    def _state_observation_space(self) -> Box:
+        speed_range = (
+            self.config["speed_goal_actions"]
+            if self.config["discrete_actions"]
+            else self.config["continuous_speed_range"]
+        )
+
+        return Box(
+            low=np.array([min(speed_range), -10.0, -10.0, 0, 0, 0, 0, 0, 0]),
+            high=np.array([max(speed_range), 10.0, 10.0, 1, 1, 1, 1, 1, 1]),
+            dtype=np.float32,
+        )
 
     def reset(self):
         # select random town from configurations
@@ -254,6 +304,9 @@ class CarlaEnvironment(gym.Env):
         self.carla_manager.stop_episode()
         self.state = self.carla_manager.start_episode(town=self._town)
         print("RESET EPISODE IN TOWN: ", self._town)
+
+        self._route_planner = RoutePlanner()
+        self._route_planner.set_route(self.state.scenario_state.global_plan, True)
 
         return self._get_obs()
 
@@ -276,7 +329,7 @@ class CarlaEnvironment(gym.Env):
         )
 
     def _get_obs_without_vision(self):
-        observation = {}
+        observation = self._setup_observation_state()
 
         for index, image in enumerate(self.state.ego_vehicle_state.sensor_data.images):
             observation[f"image_{index}"] = image[:, :, :3]
@@ -286,31 +339,71 @@ class CarlaEnvironment(gym.Env):
                 "lidar"
             ] = self.state.ego_vehicle_state.sensor_data.lidar_data.bev
 
-        observation["state"] = np.array([self.state.ego_vehicle_state.speed])
-
         return observation
 
     def _get_obs_with_vision(self):
         if self.vision_module is None:
             raise ValueError("Vision module is not set")
 
+        observation = self._setup_observation_state()
+
         vision_encoding = self.vision_module(self.state)
-        # TODO: get direction of target point, and next high level command, and use as observation state for the RL model
 
-        command = self.state.scenario_state.global_plan[2]
+        observation["vision_encoding"] = vision_encoding
+        return observation
 
-        print("COMMAND: ", command)
+    def _setup_observation_state(self) -> dict:
+        observation = {}
+        if self._route_planner is None:
+            raise ValueError("Route planner is not set")
 
-        observation = {
-            "vision_encoding": vision_encoding,
-            "state": np.array([self.state.ego_vehicle_state.speed]),
-        }
+        _, pos, target_point, next_cmd = self._route_planner.run_step(
+            gps=self.state.ego_vehicle_state.gps
+        )
+
+        relative_target_waypoint = find_relative_target_waypoint(
+            pos, target_point, self.state.ego_vehicle_state.compass
+        )
+
+        command = np.zeros(6)
+
+        if next_cmd == RoadOption.STRAIGHT:
+            command[0] = 1.0
+        elif next_cmd == RoadOption.LANEFOLLOW:
+            command[1] = 1.0
+        elif next_cmd == RoadOption.LEFT:
+            command[2] = 1.0
+        elif next_cmd == RoadOption.RIGHT:
+            command[3] = 1.0
+        elif next_cmd == RoadOption.CHANGELANELEFT:
+            command[4] = 1.0
+        elif next_cmd == RoadOption.CHANGELANERIGHT:
+            command[5] = 1.0
+
+        state = np.concatenate(
+            (
+                np.array([self.state.ego_vehicle_state.speed]),
+                relative_target_waypoint,
+                command,
+            ),
+            axis=0,
+        )
+
+        observation["state"] = state
 
         return observation
+
+    def _get_target_point(self) -> np.ndarray:
+        """"""
+        return np.array([0.0])
 
     def step(self, action):
         goal_speed = 0.0
         steering = 0.0
+
+        self._steps += 1
+
+        print("ACTION: ", action)
 
         if self.config["discrete_actions"]:
             goal_speed = self.config["speed_goal_actions"][
@@ -322,10 +415,11 @@ class CarlaEnvironment(gym.Env):
             ]
 
         else:
-            if not isinstance(action, tuple):
-                raise ValueError("Action must be a tuple")
+            print("ACTION TYPE: ", type(action))
+            if not isinstance(action, np.ndarray):
+                raise ValueError("Action must be a numpy array")
 
-            goal_speed, steering = action
+            goal_speed, steering = action[0], action[1]
 
         throttle, brake, reverse = self.speed_controller(
             goal_speed, self.state.ego_vehicle_state.speed
@@ -333,11 +427,12 @@ class CarlaEnvironment(gym.Env):
 
         new_action = Action(throttle, brake, reverse, steering)
 
+        print("NEW ACTION: ", new_action)
+
         if self.vision_module is not None:
             new_action = self.vision_module.postprocess_action(new_action)
 
         # update state with result of using the new action
-
         self.state = self.carla_manager.step(new_action)
 
         reward, done = self.reward_function(self.state)
