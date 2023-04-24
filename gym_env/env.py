@@ -5,13 +5,13 @@ from typing import Callable, List, Optional, Protocol, Set, Tuple, TypedDict
 from episode_manager.renderer import WorldStateRenderer, generate_pygame_surface
 
 from collections import deque
-import gym
+import gymnasium as gym
 import numpy as np
 import pygame
 from episode_manager import EpisodeManager
 from episode_manager.episode_manager import Action, WorldState
-from gym.spaces import Box, Dict, Discrete
-from gym.utils import seeding
+from gymnasium.spaces import Box, Dict, Discrete
+from gymnasium.utils import seeding
 from srunner.tools.route_parser import RoadOption
 
 from route_planner import RoutePlanner, find_relative_target_waypoint
@@ -208,6 +208,8 @@ class CarlaEnvironment(gym.Env):
         self.amount_of_steering_actions = len(self.config["steering_actions"])
         self._route_planner: Optional[RoutePlanner] = None
 
+        print("INITIALIZING ENVIRONMENT")
+
         if self.config["discrete_actions"]:
             self.action_space = Discrete(
                 self.amount_of_steering_actions * self.amount_of_speed_actions
@@ -283,19 +285,13 @@ class CarlaEnvironment(gym.Env):
         return observation_space_dict
 
     def _state_observation_space(self) -> Box:
-        speed_range = (
-            self.config["speed_goal_actions"]
-            if self.config["discrete_actions"]
-            else self.config["continuous_speed_range"]
-        )
-
         return Box(
-            low=np.array([min(speed_range), -10.0, -10.0, 0, 0, 0, 0, 0, 0]),
-            high=np.array([max(speed_range), 10.0, 10.0, 1, 1, 1, 1, 1, 1]),
+            low=np.array([-2.0, -10.0, -10.0, 0, 0, 0, 0, 0, 0]),
+            high=np.array([10.0, 10.0, 10.0, 1, 1, 1, 1, 1, 1]),
             dtype=np.float32,
         )
 
-    def reset(self):
+    def reset(self, seed=None, options=None):
         # select random town from configurations
         self._n_episodes += 1
         if self._n_episodes % self.config["town_change_frequency"] == 0:
@@ -303,12 +299,11 @@ class CarlaEnvironment(gym.Env):
 
         self.carla_manager.stop_episode()
         self.state = self.carla_manager.start_episode(town=self._town)
-        print("RESET EPISODE IN TOWN: ", self._town)
 
         self._route_planner = RoutePlanner()
         self._route_planner.set_route(self.state.scenario_state.global_plan, True)
 
-        return self._get_obs()
+        return self._get_obs(), {}
 
     def render(self, mode="human") -> Optional[np.ndarray]:
         if mode == "human":
@@ -334,7 +329,7 @@ class CarlaEnvironment(gym.Env):
         for index, image in enumerate(self.state.ego_vehicle_state.sensor_data.images):
             observation[f"image_{index}"] = image[:, :, :3]
 
-        if self.state.ego_vehicle_state.sensor_data.lidar_data:
+        if self.carla_manager.config.car_config.lidar["enabled"]:
             observation[
                 "lidar"
             ] = self.state.ego_vehicle_state.sensor_data.lidar_data.bev
@@ -364,6 +359,8 @@ class CarlaEnvironment(gym.Env):
         relative_target_waypoint = find_relative_target_waypoint(
             pos, target_point, self.state.ego_vehicle_state.compass
         )
+
+        relative_target_waypoint = np.clip(relative_target_waypoint, -10.0, 10.0)
 
         command = np.zeros(6)
 
@@ -403,8 +400,6 @@ class CarlaEnvironment(gym.Env):
 
         self._steps += 1
 
-        print("ACTION: ", action)
-
         if self.config["discrete_actions"]:
             goal_speed = self.config["speed_goal_actions"][
                 action // self.amount_of_steering_actions
@@ -415,11 +410,13 @@ class CarlaEnvironment(gym.Env):
             ]
 
         else:
-            print("ACTION TYPE: ", type(action))
             if not isinstance(action, np.ndarray):
                 raise ValueError("Action must be a numpy array")
 
             goal_speed, steering = action[0], action[1]
+
+        goal_speed = float(goal_speed)
+        steering = float(steering)
 
         throttle, brake, reverse = self.speed_controller(
             goal_speed, self.state.ego_vehicle_state.speed
@@ -437,7 +434,7 @@ class CarlaEnvironment(gym.Env):
 
         reward, done = self.reward_function(self.state)
 
-        result = (self._get_obs(), reward, done, {})
+        result = (self._get_obs(), reward, done, False, {})
         self.time = time()
 
         return result

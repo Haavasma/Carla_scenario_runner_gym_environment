@@ -7,6 +7,6 @@ setup(
     version="0.0.1",
     install_requires=[
         "episode_manager @ git+https://github.com/Haavasma/episode_manager.git",
-        "gym",
+        "gymnasium",
     ],
 )
