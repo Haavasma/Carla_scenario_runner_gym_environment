@@ -14,7 +14,7 @@ from gymnasium.spaces import Box, Dict, Discrete
 from gymnasium.utils import seeding
 from srunner.tools.route_parser import RoadOption
 
-from route_planner import RoutePlanner, find_relative_target_waypoint
+from gym_env.route_planner import RoutePlanner
 
 
 class VisionModule(Protocol):
