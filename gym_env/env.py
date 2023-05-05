@@ -58,6 +58,7 @@ class CarlaEnvironmentConfiguration(TypedDict):
     discrete_actions: bool
     towns: List[str]
     town_change_frequency: int
+    concat_images: bool
 
 
 def default_config() -> CarlaEnvironmentConfiguration:
@@ -69,6 +70,7 @@ def default_config() -> CarlaEnvironmentConfiguration:
         "discrete_actions": True,
         "towns": ["Town01", "Town03", "Town04"],
         "town_change_frequency": 10,
+        "concat_images": False,
     }
 
 
